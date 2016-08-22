@@ -2,6 +2,8 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
+using System.Reflection;
+using System.Reflection.Emit;
 using NLog;
 using Newtonsoft.Json.Linq;
 
@@ -11,6 +13,22 @@ namespace Gelf4NLog.Target
     {
         private const int ShortMessageMaxLength = 250;
         private const string GelfVersion = "1.0";
+
+        private GetMappedDiagnosticsLogicalContextDelegate _getLogicalThreadDictionary;
+
+        public GelfConverter()
+        {
+            var type = typeof(MappedDiagnosticsLogicalContext);
+            var property = type.GetProperty("LogicalThreadDictionary", BindingFlags.Static | BindingFlags.NonPublic);
+            var getLogicalThreadDictionary = property.GetGetMethod(true);
+
+            var method = new DynamicMethod("GetMappedDiagnosticsLogicalContext", typeof(IDictionary<string, string>), null, typeof(MappedDiagnosticsLogicalContext), true);
+            var ilGen = method.GetILGenerator();
+            ilGen.Emit(OpCodes.Call, getLogicalThreadDictionary);
+            ilGen.Emit(OpCodes.Ret);
+
+            _getLogicalThreadDictionary = (GetMappedDiagnosticsLogicalContextDelegate)method.CreateDelegate(typeof(GetMappedDiagnosticsLogicalContextDelegate));
+        }
 
         public JObject GetGelfJson(LogEventInfo logEventInfo, string facility)
         {
@@ -60,33 +78,46 @@ namespace Gelf4NLog.Target
             //Add any other interesting data to LogEventInfo properties
             logEventInfo.Properties.Add("LoggerName", logEventInfo.LoggerName);
 
+            try
+            {
+                var logicalThreadDictionary = _getLogicalThreadDictionary();
+                if (logicalThreadDictionary != null)
+                {
+                    foreach (var item in logicalThreadDictionary)
+                    {
+                        AddAdditionalField(jsonObject, item.Key, item.Value);
+                    }
+                }
+            }
+            catch (Exception e) { }
+
             //We will persist them "Additional Fields" according to Gelf spec
             foreach (var property in logEventInfo.Properties)
             {
-                AddAdditionalField(jsonObject, property);
+				AddAdditionalField(jsonObject, property.Key as string, property.Value as string);
             }
 
             return jsonObject;
         }
 
-        private static void AddAdditionalField(IDictionary<string, JToken> jObject, KeyValuePair<object, object> property)
-        {
-            var key = property.Key as string;
-            var value = property.Value as string;
+		private static void AddAdditionalField(IDictionary<string, JToken> jObject, string key, string value)
+		{
+			//var key = property.Key as string;
+			//var value = property.Value as string;
 
-            if (key == null) return;
+		    if (key == null) return;
 
-            //According to the GELF spec, libraries should NOT allow to send id as additional field (_id)
-            //Server MUST skip the field because it could override the MongoDB _key field
-            if (key.Equals("id", StringComparison.OrdinalIgnoreCase))
-                key = "id_";
+		    //According to the GELF spec, libraries should NOT allow to send id as additional field (_id)
+			//Server MUST skip the field because it could override the MongoDB _key field
+		    if (key.Equals("id", StringComparison.OrdinalIgnoreCase))
+		        key = "id_";
 
-            //According to the GELF spec, additional field keys should start with '_' to avoid collision
-            if (!key.StartsWith("_", StringComparison.OrdinalIgnoreCase))
-                key = "_" + key;
+		    //According to the GELF spec, additional field keys should start with '_' to avoid collision
+		    if (!key.StartsWith("_", StringComparison.OrdinalIgnoreCase))
+		        key = "_" + key;
 
-            jObject.Add(key, value);
-        }
+		    jObject.Add(key, value);
+		}
 
         /// <summary>
         /// Values from SyslogSeverity enum here: http://marc.info/?l=log4net-dev&m=109519564630799
